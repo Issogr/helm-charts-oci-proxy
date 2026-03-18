@@ -114,4 +114,4 @@ Note that rewriting changes the chart archive contents, so Helm provenance/signa
 
 This project is licensed under the GNU Affero General Public License v3.0. See `LICENSE`.
 
-It was originally developed by 8gears / Container Registry, and that origin should remain credited in derivative and redistributed versions of the project.
+It was originally developed at `https://github.com/container-registry/helm-charts-oci-proxy`, and that origin should remain credited in derivative and redistributed versions of the project.

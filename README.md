@@ -72,6 +72,16 @@ helm template chartproxy ./chart
 
 By default the chart deploys the proxy as a single pod with in-memory storage.
 
+## Release Model
+
+The repository uses a simple deployment-focused versioning flow:
+
+- pushes to `main` run validation in CI, but do not publish release artifacts
+- pushing a git tag like `v1.2.3` publishes a Docker image tagged `1.2.3`
+- the same git tag also publishes the Helm chart with `version: 1.2.3` and `appVersion: 1.2.3`
+
+This keeps Docker and Helm releases aligned and ensures artifacts are published only for explicit tagged releases.
+
 ## Configuration
 
 Main environment variables:

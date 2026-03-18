@@ -1,94 +1,73 @@
-name: "Publish Chart"
+name: Publish Chart
+
 on:
-  workflow_dispatch:
-  pull_request:
-    paths:
-      - "chart/**"
-      - ".github/workflows/publish-chart.yml"
   push:
-    paths:
-      - "chart/**"
-      - ".github/workflows/publish-chart.yml"
-    branches:
-      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Helm chart version to publish
+        required: true
+      app_version:
+        description: App version to embed in the chart (defaults to version)
+        required: false
+
 jobs:
-  check-version-change:
+  publish-chart:
     runs-on: ubuntu-latest
-    outputs:
-      should_publish: ${{ steps.check-version.outputs.changed == 'true' || steps.manual-flag.outputs.changed == 'true' }}
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
-          fetch-depth: 0
+
+      - name: Determine release versions
+        id: versions
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            APP_VERSION="$VERSION"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+            APP_VERSION="${{ github.event.inputs.app_version }}"
+            if [[ -z "$APP_VERSION" ]]; then
+              APP_VERSION="$VERSION"
+            fi
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install yq
         run: |
           sudo wget https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64 -O /usr/local/bin/yq
           sudo chmod +x /usr/local/bin/yq
 
-      - name: Check if Chart Version Changed
-        id: check-version
-        if: github.event_name != 'workflow_dispatch'
-        run: |
-          # For PRs, compare against base branch; for pushes, compare against previous commit
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE_REF="origin/${{ github.base_ref }}"
-          else
-            BASE_REF="HEAD^"
-          fi
-
-          if git diff --name-only "$BASE_REF" HEAD | grep -q 'chart/Chart.yaml'; then
-            # Check if Chart.yaml existed in base ref
-            if git cat-file -e "${BASE_REF}:chart/Chart.yaml" 2>/dev/null; then
-              PREVIOUS_VERSION=$(git show "${BASE_REF}:chart/Chart.yaml" | yq -r '.version')
-              CURRENT_VERSION=$(yq -r '.version' chart/Chart.yaml)
-              if [ "$PREVIOUS_VERSION" != "$CURRENT_VERSION" ]; then
-                echo "Version changed from $PREVIOUS_VERSION to $CURRENT_VERSION"
-                echo "changed=true" >> $GITHUB_OUTPUT
-              else
-                echo "Version didn't change ($CURRENT_VERSION)"
-                echo "changed=false" >> $GITHUB_OUTPUT
-              fi
-            else
-              echo "Chart.yaml is newly added, treating as version change"
-              echo "changed=true" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "Chart.yaml wasn't modified"
-            echo "changed=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Set Publish Flag for Manual Runs
-        if: github.event_name == 'workflow_dispatch'
-        id: manual-flag
-        run: echo "changed=true" >> $GITHUB_OUTPUT
-
-  publish-chart:
-    needs: check-version-change
-    if: needs.check-version-change.outputs.should_publish == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
-          fetch-depth: 0
-
-      - name: Install Helm
+      - name: Set up Helm
         uses: azure/setup-helm@v3
         with:
           version: v3.14.0
 
-      - name: Copy README.md to Chart Directory
+      - name: Stamp chart version
+        env:
+          RELEASE_VERSION: ${{ steps.versions.outputs.version }}
+          APP_VERSION: ${{ steps.versions.outputs.app_version }}
+        run: |
+          yq -i '.version = strenv(RELEASE_VERSION)' chart/Chart.yaml
+          yq -i '.appVersion = strenv(APP_VERSION)' chart/Chart.yaml
+
+      - name: Copy README into chart package
         run: cp README.md chart/README.md
 
-      - name: Create Chart Package
+      - name: Validate chart
+        run: |
+          helm lint ./chart
+          helm template chartproxy ./chart >/tmp/chart-rendered.yaml
+
+      - name: Create chart package
         run: helm package chart -d ./tmp
 
-      - name: Login to Registry
+      - name: Login to registry
         run: echo "${{ secrets.REGISTRY_PASSWORD }}" | helm registry login ${{ vars.REGISTRY_ADDR }} --username ${{ vars.REGISTRY_USERNAME }} --password-stdin
 
-      - name: Push Packaged Chart to Registry
+      - name: Push packaged chart to registry
         run: helm push ./tmp/* oci://${{ vars.REGISTRY_ADDR }}/library

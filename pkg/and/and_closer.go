@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package and provides helpers for adding Close to io.{Reader|Writer}.
+// Package and provides helpers for adding Close to io.Reader.
 package and
 
 import (
@@ -31,18 +31,4 @@ var _ io.ReadCloser = (*ReadCloser)(nil)
 // Close implements io.ReadCloser
 func (rac *ReadCloser) Close() error {
 	return rac.CloseFunc()
-}
-
-// WriteCloser implements io.WriteCloser by reading from a particular io.Writer
-// and then calling the provided "Close()" method.
-type WriteCloser struct {
-	io.Writer
-	CloseFunc func() error
-}
-
-var _ io.WriteCloser = (*WriteCloser)(nil)
-
-// Close implements io.WriteCloser
-func (wac *WriteCloser) Close() error {
-	return wac.CloseFunc()
 }

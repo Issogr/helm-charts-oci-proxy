@@ -1,7 +1,6 @@
 package blobs
 
 import (
-	"bytes"
 	cerrors "errors"
 	"fmt"
 	"github.com/container-registry/helm-charts-oci-proxy/internal/blobs/handler"
@@ -12,21 +11,20 @@ import (
 	"net/http"
 	"path"
 	"strings"
-	"sync"
 )
 
-// errNotFound represents an error locating the Blob.
+type blobHandler interface {
+	handler.BlobHandler
+	handler.BlobStatHandler
+}
 
 // Blobs service
 type Blobs struct {
-	handler handler.BlobHandler `json:"blobHandler"`
-	// Each upload gets a unique id that writes occur to until finalized.
-	// Temporary storage
-	lock sync.Mutex
-	log  logrus.StdLogger
+	handler blobHandler `json:"blobHandler"`
+	log     logrus.StdLogger
 }
 
-func NewBlobs(blobHandler handler.BlobHandler, log logrus.StdLogger) *Blobs {
+func NewBlobs(blobHandler blobHandler, log logrus.StdLogger) *Blobs {
 	return &Blobs{handler: blobHandler, log: log}
 }
 
@@ -38,7 +36,6 @@ func (b *Blobs) Handle(resp http.ResponseWriter, req *http.Request) error {
 	if elem[len(elem)-1] == "" {
 		elem = elem[:len(elem)-1]
 	}
-	// Must have a path of form /v2/{name}/blobs/{upload,sha256:}
 	if len(elem) < 4 {
 		return &errors.RegError{
 			Status:  http.StatusBadRequest,
@@ -60,36 +57,12 @@ func (b *Blobs) Handle(resp http.ResponseWriter, req *http.Request) error {
 			}
 		}
 
-		var size int64
-		if bsh, ok := b.handler.(handler.BlobStatHandler); ok {
-			size, err = bsh.Stat(ctx, repo, h)
-			if cerrors.Is(err, ErrNotFound) {
-				return regErrBlobUnknown
-			} else if err != nil {
-				var rErr redirectError
-				if cerrors.As(err, &rErr) {
-					http.Redirect(resp, req, rErr.Location, rErr.Code)
-					return nil
-				}
-				return errors.RegErrInternal(err)
-			}
-		} else {
-			rc, err := b.handler.Get(ctx, repo, h)
-			if cerrors.Is(err, ErrNotFound) {
-				return regErrBlobUnknown
-			} else if err != nil {
-				var rErr redirectError
-				if cerrors.As(err, &rErr) {
-					http.Redirect(resp, req, rErr.Location, rErr.Code)
-					return nil
-				}
-				return errors.RegErrInternal(err)
-			}
-			defer rc.Close()
-			size, err = io.Copy(io.Discard, rc)
-			if err != nil {
-				return errors.RegErrInternal(err)
-			}
+		size, err := b.handler.Stat(ctx, repo, h)
+		if cerrors.Is(err, ErrNotFound) {
+			return regErrBlobUnknown
+		}
+		if err != nil {
+			return errors.RegErrInternal(err)
 		}
 
 		resp.Header().Set("Content-Length", fmt.Sprint(size))
@@ -107,59 +80,30 @@ func (b *Blobs) Handle(resp http.ResponseWriter, req *http.Request) error {
 			}
 		}
 
-		var size int64
-		var r io.Reader
-		if bsh, ok := b.handler.(handler.BlobStatHandler); ok {
-			size, err = bsh.Stat(ctx, repo, h)
-			if cerrors.Is(err, ErrNotFound) {
-				return regErrBlobUnknown
-			} else if err != nil {
-				var rErr redirectError
-				if cerrors.As(err, &rErr) {
-					http.Redirect(resp, req, rErr.Location, rErr.Code)
-					return nil
-				}
-				return errors.RegErrInternal(err)
-			}
-
-			rc, err := b.handler.Get(ctx, repo, h)
-			if cerrors.Is(err, ErrNotFound) {
-				return regErrBlobUnknown
-			} else if err != nil {
-				var rErr redirectError
-				if cerrors.As(err, &rErr) {
-					http.Redirect(resp, req, rErr.Location, rErr.Code)
-					return nil
-				}
-
-				return errors.RegErrInternal(err)
-			}
-			defer rc.Close()
-			r = rc
-		} else {
-			tmp, err := b.handler.Get(ctx, repo, h)
-			if cerrors.Is(err, ErrNotFound) {
-				return regErrBlobUnknown
-			} else if err != nil {
-				var rerr redirectError
-				if cerrors.As(err, &rerr) {
-					http.Redirect(resp, req, rerr.Location, rerr.Code)
-					return nil
-				}
-
-				return errors.RegErrInternal(err)
-			}
-			defer tmp.Close()
-			var buf bytes.Buffer
-			io.Copy(&buf, tmp)
-			size = int64(buf.Len())
-			r = &buf
+		size, err := b.handler.Stat(ctx, repo, h)
+		if cerrors.Is(err, ErrNotFound) {
+			return regErrBlobUnknown
 		}
+		if err != nil {
+			return errors.RegErrInternal(err)
+		}
+
+		rc, err := b.handler.Get(ctx, repo, h)
+		if cerrors.Is(err, ErrNotFound) {
+			return regErrBlobUnknown
+		}
+		if err != nil {
+			return errors.RegErrInternal(err)
+		}
+		defer rc.Close()
 
 		resp.Header().Set("Content-Length", fmt.Sprint(size))
 		resp.Header().Set("Docker-Content-Digest", h.String())
 		resp.WriteHeader(http.StatusOK)
-		io.Copy(resp, r)
+		_, err = io.Copy(resp, rc)
+		if err != nil {
+			return errors.RegErrInternal(err)
+		}
 		return nil
 
 	default:

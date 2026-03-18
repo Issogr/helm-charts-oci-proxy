@@ -65,7 +65,7 @@ Contents are only stored in memory, and when the process exits, pushed data is l
 			cacheTTL, _ := env.GetInt("MANIFEST_CACHE_TTL", 60)              // 1 minute
 			indexCacheTTL, _ := env.GetInt("INDEX_CACHE_TTL", 3600*4)        // 4 hours
 			indexErrorCacheTTL, _ := env.GetInt("INDEX_ERROR_CACHE_TTL", 30) // 30 seconds
-			downloadTimeout, _ := env.GetInt("DOWNLOAD_TIMEOUT", 30)          // 30 seconds
+			downloadTimeout, _ := env.GetInt("DOWNLOAD_TIMEOUT", 30)         // 30 seconds
 			maxIndexBytes, _ := env.GetInt("MAX_INDEX_BYTES", 32*1024*1024)  // 32 MiB
 			maxChartBytes, _ := env.GetInt("MAX_CHART_BYTES", 256*1024*1024) // 256 MiB
 
@@ -110,7 +110,6 @@ Contents are only stored in memory, and when the process exits, pushed data is l
 			}, indexCache, l)
 
 			blobsHttpHandler := blobs.NewBlobs(blobsHandler, l)
-			//blobsHandler = file.NewHandler(dbLocation)
 			s := &http.Server{
 				ReadHeaderTimeout: 5 * time.Second, // prevent slowloris, quiet linter
 				Handler: registry.New(

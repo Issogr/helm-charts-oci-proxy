@@ -58,21 +58,3 @@ func RegErrInternal(err error) *RegError {
 		Message: err.Error(),
 	}
 }
-
-var RegErrUnsupported = &RegError{
-	Status:  http.StatusMethodNotAllowed,
-	Code:    "UNSUPPORTED",
-	Message: "Unsupported operation",
-}
-
-var RegErrDigestMismatch = &RegError{
-	Status:  http.StatusBadRequest,
-	Code:    "DIGEST_INVALID",
-	Message: "digest does not match contents",
-}
-
-var RegErrDigestInvalid = &RegError{
-	Status:  http.StatusBadRequest,
-	Code:    "NAME_INVALID",
-	Message: "invalid digest",
-}

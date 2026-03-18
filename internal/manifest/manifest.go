@@ -266,10 +266,6 @@ func (m *Manifests) HandleTags(resp http.ResponseWriter, req *http.Request) erro
 	return nil
 }
 
-func (m *Manifests) Read(repo string, name string) (Manifest, error) {
-	return m.ReadVariant(repo, defaultVariantKey, name)
-}
-
 func (m *Manifests) ReadVariant(repo string, variant string, name string) (Manifest, error) {
 	m.lock.RLock()
 	defer m.lock.RUnlock()
@@ -287,10 +283,6 @@ func (m *Manifests) ReadVariant(repo string, variant string, name string) (Manif
 		return Manifest{}, fmt.Errorf("manifest not found")
 	}
 	return ma, nil
-}
-
-func (m *Manifests) Write(repo string, name string, n Manifest) error {
-	return m.WriteVariant(repo, defaultVariantKey, name, n)
 }
 
 func (m *Manifests) WriteVariant(repo string, variant string, name string, n Manifest) error {

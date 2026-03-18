@@ -51,35 +51,3 @@ func TestRead(t *testing.T) {
 		t.Error("called after Close(); got false, wanted true")
 	}
 }
-
-func TestWrite(t *testing.T) {
-	w := bytes.NewBuffer([]byte{})
-	called := false
-
-	wac := &WriteCloser{
-		Writer: w,
-		CloseFunc: func() error {
-			called = true
-			return nil
-		},
-	}
-
-	want := "asdf"
-	if _, err := wac.Write([]byte(want)); err != nil {
-		t.Errorf("Write(%q); = %v", want, err)
-	}
-
-	if called {
-		t.Error("called before Close(); got true, wanted false")
-	}
-	if err := wac.Close(); err != nil {
-		t.Errorf("Close() = %v", err)
-	}
-	if !called {
-		t.Error("called after Close(); got false, wanted true")
-	}
-
-	if got := w.String(); got != want {
-		t.Errorf("w.String(); got %q, want %q", got, want)
-	}
-}

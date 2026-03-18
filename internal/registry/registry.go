@@ -1,23 +1,18 @@
 package registry
 
 import (
-	"encoding/json"
 	"fmt"
 	"github.com/container-registry/helm-charts-oci-proxy/internal/errors"
 	"github.com/container-registry/helm-charts-oci-proxy/internal/helper"
 	"github.com/sirupsen/logrus"
-	"io"
 	"log"
 	"net/http"
-	"time"
 )
 
 type Registry struct {
 	log logrus.StdLogger
 
-	// to operate blobs directly from registry
-	blobs Handler `json:"blobs"`
-	//
+	blobs     Handler `json:"blobs"`
 	manifests Handler `json:"manifests"`
 	tags      Handler
 	catalog   Handler
@@ -26,16 +21,6 @@ type Registry struct {
 }
 
 func (r *Registry) v2(resp http.ResponseWriter, req *http.Request) error {
-	/// debug //
-	if req.URL.Path == "/" || req.URL.Path == "" {
-		return r.homeHandler(resp, req)
-	}
-	if req.URL.Path == "/api/version" {
-		return r.versionHandler(resp)
-	}
-	if req.URL.Path == "/api/systeminfo" || req.URL.Path == "/api/v2.0/systeminfo" {
-		return r.harborInfoHandler(resp)
-	}
 	if helper.IsBlob(req) {
 		return r.blobs(resp, req)
 	}
@@ -50,7 +35,7 @@ func (r *Registry) v2(resp http.ResponseWriter, req *http.Request) error {
 	}
 	if helper.IsV2(req) {
 		resp.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-		resp.WriteHeader(200)
+		resp.WriteHeader(http.StatusOK)
 		return nil
 	}
 	return &errors.RegError{
@@ -58,41 +43,6 @@ func (r *Registry) v2(resp http.ResponseWriter, req *http.Request) error {
 		Code:    "METHOD_UNKNOWN",
 		Message: fmt.Sprintf("We don't understand your URL: %s", req.URL.Path),
 	}
-}
-
-// api/version
-func (r *Registry) versionHandler(resp http.ResponseWriter) error {
-	res := struct {
-		Version string `json:"version"`
-	}{
-		Version: "v2.0",
-	}
-	resp.WriteHeader(200)
-	if err := prettyEncode(res, resp); err != nil {
-		return errors.RegErrInternal(err)
-	}
-	return nil
-}
-
-// api/v2.0/systeminfo
-func (r *Registry) harborInfoHandler(resp http.ResponseWriter) error {
-	res := struct {
-		HarborVersion string    `json:"harbor_version"`
-		CurrentTime   time.Time `json:"current_time"`
-	}{
-		HarborVersion: "v2.7.0-864aca34",
-		CurrentTime:   time.Now(),
-	}
-	resp.WriteHeader(200)
-	if err := prettyEncode(res, resp); err != nil {
-		return errors.RegErrInternal(err)
-	}
-	return nil
-}
-
-func (r *Registry) homeHandler(w http.ResponseWriter, req *http.Request) error {
-	http.Redirect(w, req, "https://container-registry.com/helm-charts-oci-proxy/", 302)
-	return nil
 }
 
 func (r *Registry) root(resp http.ResponseWriter, req *http.Request) {
@@ -143,13 +93,4 @@ func Debug(v bool) Option {
 	return func(r *Registry) {
 		r.debug = v
 	}
-}
-
-func prettyEncode(data interface{}, out io.Writer) error {
-	enc := json.NewEncoder(out)
-	enc.SetIndent("", "    ")
-	if err := enc.Encode(data); err != nil {
-		return err
-	}
-	return nil
 }

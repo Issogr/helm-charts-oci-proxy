@@ -16,8 +16,7 @@ type BlobHandler interface {
 // BlobStatHandler is an extension interface representing a Blob storage
 // backend that can serve metadata about blobs.
 type BlobStatHandler interface {
-	// Stat returns the size of the Blob, or errNotFound if the Blob wasn't
-	// found, or redirectError if the Blob can be found elsewhere.
+	// Stat returns the size of the Blob, or errNotFound if the Blob wasn't found.
 	Stat(ctx context.Context, repo string, h v1.Hash) (int64, error)
 }
 

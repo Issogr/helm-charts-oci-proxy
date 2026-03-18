@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/container-registry/helm-charts-oci-proxy/internal/blobs"
@@ -64,9 +65,15 @@ Contents are only stored in memory, and when the process exits, pushed data is l
 			cacheTTL, _ := env.GetInt("MANIFEST_CACHE_TTL", 60)              // 1 minute
 			indexCacheTTL, _ := env.GetInt("INDEX_CACHE_TTL", 3600*4)        // 4 hours
 			indexErrorCacheTTL, _ := env.GetInt("INDEX_ERROR_CACHE_TTL", 30) // 30 seconds
+			downloadTimeout, _ := env.GetInt("DOWNLOAD_TIMEOUT", 30)          // 30 seconds
+			maxIndexBytes, _ := env.GetInt("MAX_INDEX_BYTES", 32*1024*1024)  // 32 MiB
+			maxChartBytes, _ := env.GetInt("MAX_CHART_BYTES", 256*1024*1024) // 256 MiB
 
 			rewriteDeps, _ := env.GetBool("REWRITE_DEPENDENCIES", false)
 			proxyHost := env.GetString("PROXY_HOST", "")
+			if rewriteDeps && proxyHost == "" {
+				return fmt.Errorf("PROXY_HOST must be set when REWRITE_DEPENDENCIES is enabled")
+			}
 
 			useTLS, _ := env.GetBool("USE_TLS", false)
 			certFile := env.GetString("CERT_FILE", "certs/registry.pem")
@@ -95,6 +102,9 @@ Contents are only stored in memory, and when the process exits, pushed data is l
 				CacheTTL:            time.Duration(cacheTTL) * time.Second,
 				IndexCacheTTL:       time.Duration(indexCacheTTL) * time.Second,
 				IndexErrorCacheTTl:  time.Duration(indexErrorCacheTTL) * time.Second,
+				DownloadTimeout:     time.Duration(downloadTimeout) * time.Second,
+				MaxIndexBytes:       int64(maxIndexBytes),
+				MaxChartBytes:       int64(maxChartBytes),
 				RewriteDependencies: rewriteDeps,
 				ProxyHost:           proxyHost,
 			}, indexCache, l)
@@ -111,7 +121,7 @@ Contents are only stored in memory, and when the process exits, pushed data is l
 					registry.Debug(debug), registry.Logger(l)),
 			}
 
-			errCh := make(chan error)
+			errCh := make(chan error, 1)
 			go func() {
 				if useTLS {
 					l.Printf("listening HTTP over TLS serving on port %d", portI)
@@ -122,13 +132,22 @@ Contents are only stored in memory, and when the process exits, pushed data is l
 				}
 			}()
 
-			<-ctx.Done()
-			l.Println("shutting down...")
-			if err := s.Shutdown(ctx); err != nil {
-				return err
-			}
-			if err := <-errCh; !errors.Is(err, http.ErrServerClosed) {
-				return err
+			select {
+			case err := <-errCh:
+				if !errors.Is(err, http.ErrServerClosed) {
+					return err
+				}
+				return nil
+			case <-ctx.Done():
+				l.Println("shutting down...")
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := s.Shutdown(shutdownCtx); err != nil {
+					return err
+				}
+				if err := <-errCh; !errors.Is(err, http.ErrServerClosed) {
+					return err
+				}
 			}
 			return nil
 		},

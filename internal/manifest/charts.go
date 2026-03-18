@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"github.com/container-registry/helm-charts-oci-proxy/internal/blobs/handler"
 	"github.com/container-registry/helm-charts-oci-proxy/internal/errors"
@@ -117,7 +118,7 @@ func (m *Manifests) prepareChart(ctx context.Context, repo string, reference str
 	path := strings.Join(elem[:len(elem)-1], "/")
 	chart := elem[len(elem)-1]
 
-	index, err := m.GetIndex(path)
+	index, err := m.GetIndex(ctx, path)
 	if err != nil {
 		return &errors.RegError{
 			Status:  http.StatusNotFound,
@@ -166,7 +167,7 @@ func (m *Manifests) prepareChart(ctx context.Context, repo string, reference str
 		downloadUrl = fmt.Sprintf("https://%s/%s", path, chartVer.URLs[0])
 	}
 
-	manifestData, err := m.download(downloadUrl)
+	manifestData, err := m.download(ctx, downloadUrl, m.config.MaxChartBytes)
 	if err != nil {
 		return errors.RegErrInternal(err)
 	}
@@ -265,7 +266,7 @@ func (m *Manifests) prepareChart(ctx context.Context, repo string, reference str
 		return nil
 	}
 
-	dst := NewInternalDst(fmt.Sprintf("%s/%s", path, chartVer.Name), m.blobHandler.(handler.BlobPutHandler), m)
+	dst := NewInternalDst(fmt.Sprintf("%s/%s", path, chartVer.Name), m.variantKey(rewriteOpts), m.blobHandler.(handler.BlobPutHandler), m)
 	// push
 	if reference == "" {
 		err = oras.CopyGraph(ctx, memStore, dst, root, copyOptions.CopyGraphOptions)
@@ -278,7 +279,7 @@ func (m *Manifests) prepareChart(ctx context.Context, repo string, reference str
 	return nil
 }
 
-func (m *Manifests) GetIndex(repoURLPath string) (*repo.IndexFile, error) {
+func (m *Manifests) GetIndex(ctx context.Context, repoURLPath string) (*repo.IndexFile, error) {
 
 	type cacheResp struct {
 		c   *repo.IndexFile
@@ -290,7 +291,10 @@ func (m *Manifests) GetIndex(repoURLPath string) (*repo.IndexFile, error) {
 	if !ok || c == nil {
 		// nothing in the cache
 		res := &cacheResp{}
-		res.c, res.err = m.downloadIndex(repoURLPath)
+		res.c, res.err = m.downloadIndex(ctx, repoURLPath)
+		if stderrors.Is(res.err, context.Canceled) || stderrors.Is(res.err, context.DeadlineExceeded) {
+			return res.c, res.err
+		}
 
 		var ttl = m.config.IndexCacheTTL
 		if res.err != nil {
@@ -310,36 +314,43 @@ func (m *Manifests) GetIndex(repoURLPath string) (*repo.IndexFile, error) {
 	return res.c, res.err
 }
 
-func (m *Manifests) downloadIndex(repoURLPath string) (*repo.IndexFile, error) {
+func (m *Manifests) downloadIndex(ctx context.Context, repoURLPath string) (*repo.IndexFile, error) {
 	url := fmt.Sprintf("https://%s/index.yaml", repoURLPath)
 	if m.config.Debug {
 		m.log.Printf("download index: %s\n", url)
 	}
-	data, err := m.getIndexBytes(url)
+	data, err := m.getIndexBytes(ctx, url)
 	if err != nil {
 		return nil, err
 	}
+	return parseIndexFile(data)
+}
+
+func parseIndexFile(data []byte) (*repo.IndexFile, error) {
 	i := repo.NewIndexFile()
 
 	if len(data) == 0 {
 		return i, repo.ErrEmptyIndexYaml
 	}
-	if err = yaml.UnmarshalStrict(data, i); err != nil {
+	if err := yaml.UnmarshalStrict(data, i); err != nil {
 		return nil, err
 	}
 
-	for _, cvs := range i.Entries {
-		for idx := len(cvs) - 1; idx >= 0; idx-- {
-			if cvs[idx] == nil {
+	for name, cvs := range i.Entries {
+		filtered := cvs[:0]
+		for _, cv := range cvs {
+			if cv == nil {
 				continue
 			}
-			if cvs[idx].APIVersion == "" {
-				cvs[idx].APIVersion = chart.APIVersionV1
+			if cv.APIVersion == "" {
+				cv.APIVersion = chart.APIVersionV1
 			}
-			if err := cvs[idx].Validate(); err != nil {
-				cvs = append(cvs[:idx], cvs[idx+1:]...)
+			if err := cv.Validate(); err != nil {
+				continue
 			}
+			filtered = append(filtered, cv)
 		}
+		i.Entries[name] = filtered
 	}
 	i.SortEntries()
 	if i.APIVersion == "" {
@@ -348,7 +359,7 @@ func (m *Manifests) downloadIndex(repoURLPath string) (*repo.IndexFile, error) {
 	return i, nil
 }
 
-func (m *Manifests) getIndexBytes(url string) ([]byte, error) {
+func (m *Manifests) getIndexBytes(ctx context.Context, url string) ([]byte, error) {
 
 	type cacheResp struct {
 		c   []byte
@@ -360,7 +371,10 @@ func (m *Manifests) getIndexBytes(url string) ([]byte, error) {
 	if !ok || c == nil {
 		// nothing in the cache
 		res := &cacheResp{}
-		res.c, res.err = m.download(url)
+		res.c, res.err = m.download(ctx, url, m.config.MaxIndexBytes)
+		if stderrors.Is(res.err, context.Canceled) || stderrors.Is(res.err, context.DeadlineExceeded) {
+			return res.c, res.err
+		}
 
 		var ttl = m.config.IndexCacheTTL
 		if res.err != nil {
@@ -384,14 +398,32 @@ func (m *Manifests) getIndexBytes(url string) ([]byte, error) {
 
 }
 
-func (m *Manifests) download(url string) ([]byte, error) {
+func (m *Manifests) download(ctx context.Context, url string, maxBytes int64) ([]byte, error) {
 	if m.config.Debug {
 		m.log.Printf("downloading : %s\n", url)
 	}
-	resp, err := http.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := m.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s returned %s", url, resp.Status)
+	}
+	body := io.Reader(resp.Body)
+	if maxBytes > 0 {
+		body = io.LimitReader(resp.Body, maxBytes+1)
+	}
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, err
+	}
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("GET %s exceeded max size of %d bytes", url, maxBytes)
+	}
+	return data, nil
 }

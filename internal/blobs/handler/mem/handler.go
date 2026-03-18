@@ -11,7 +11,7 @@ import (
 
 type Handler struct {
 	m    map[string][]byte
-	lock sync.Mutex
+	lock sync.RWMutex
 }
 
 func NewMemHandler() *Handler {
@@ -21,8 +21,8 @@ func NewMemHandler() *Handler {
 }
 
 func (m *Handler) Stat(_ context.Context, _ string, h v1.Hash) (int64, error) {
-	m.lock.Lock()
-	defer m.lock.Unlock()
+	m.lock.RLock()
+	defer m.lock.RUnlock()
 
 	b, found := m.m[h.String()]
 	if !found {
@@ -31,8 +31,8 @@ func (m *Handler) Stat(_ context.Context, _ string, h v1.Hash) (int64, error) {
 	return int64(len(b)), nil
 }
 func (m *Handler) Get(_ context.Context, _ string, h v1.Hash) (io.ReadCloser, error) {
-	m.lock.Lock()
-	defer m.lock.Unlock()
+	m.lock.RLock()
+	defer m.lock.RUnlock()
 
 	b, found := m.m[h.String()]
 	if !found {

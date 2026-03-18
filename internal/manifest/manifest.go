@@ -12,8 +12,10 @@ import (
 	"github.com/container-registry/helm-charts-oci-proxy/internal/helper"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,23 +40,34 @@ type Manifest struct {
 }
 
 type Manifests struct {
-	// maps repo -> Manifest tag/digest -> Manifest
-	manifests   map[string]map[string]Manifest
-	lock        sync.Mutex
+	// maps repo -> variant -> Manifest tag/digest -> Manifest
+	manifests   map[string]map[string]map[string]Manifest
+	lock        sync.RWMutex
+	prepare     singleflight.Group
 	log         logrus.StdLogger
 	cache       Cache
 	blobHandler handler.BlobHandler
 	config      Config
+	httpClient  *http.Client
+	baseContext context.Context
 }
 
 func NewManifests(ctx context.Context, blobHandler handler.BlobHandler, config Config, cache Cache, log logrus.StdLogger) *Manifests {
+	if config.DownloadTimeout <= 0 {
+		config.DownloadTimeout = 30 * time.Second
+	}
+
 	ma := &Manifests{
 
-		manifests:   map[string]map[string]Manifest{},
+		manifests:   map[string]map[string]map[string]Manifest{},
 		blobHandler: blobHandler,
 		log:         log,
 		config:      config,
 		cache:       cache,
+		httpClient: &http.Client{
+			Timeout: config.DownloadTimeout,
+		},
+		baseContext: ctx,
 	}
 
 	go func() {
@@ -66,30 +79,7 @@ func NewManifests(ctx context.Context, blobHandler handler.BlobHandler, config C
 				if ma.config.Debug {
 					ma.log.Println("cleanup cycle")
 				}
-				ma.lock.Lock()
-				for _, m := range ma.manifests {
-					for k, v := range m {
-						if v.CreatedAt.Before(time.Now().Add(-ma.config.CacheTTL)) {
-							// delete
-							delete(m, k)
-							if delHandler, ok := ma.blobHandler.(handler.BlobDeleteHandler); ok {
-								for _, ref := range v.Refs {
-									h, err := v1.NewHash(ref)
-									if err != nil {
-										continue
-									}
-									if ma.config.Debug {
-										log.Printf("deleting blob %s", h.String())
-									}
-									if err = delHandler.Delete(ctx, "", h); err != nil {
-										log.Println(err)
-									}
-								}
-							}
-						}
-					}
-				}
-				ma.lock.Unlock()
+				ma.cleanupExpired(ctx)
 			case <-ctx.Done():
 				return
 			}
@@ -133,44 +123,16 @@ func (m *Manifests) Handle(resp http.ResponseWriter, req *http.Request) error {
 	repo := strings.Join(repoParts, "/")
 
 	// Determine rewrite options from config and query params
-	rewriteOpts := m.getRewriteOptions(req)
+	rewriteOpts, regErr := m.getRewriteOptions(req)
+	if regErr != nil {
+		return regErr
+	}
 
 	switch req.Method {
 	case http.MethodGet:
-		m.lock.Lock()
-		defer m.lock.Unlock()
-
-		var prepared bool
-
-		c, ok := m.manifests[repo]
-		if !ok {
-			err := m.prepareChart(req.Context(), repo, target, rewriteOpts)
-			if err != nil {
-				return err
-			}
-			prepared = true
-			// re-find
-			c = m.manifests[repo]
-		}
-
-		ma, ok := c[target]
-		if !ok {
-			if !prepared {
-				err := m.prepareChart(req.Context(), repo, target, rewriteOpts)
-				if err != nil {
-					return err
-				}
-			}
-
-			ma, ok = c[target]
-			if !ok {
-				// we failed
-				return &errors.RegError{
-					Status:  http.StatusNotFound,
-					Code:    "NOT FOUND",
-					Message: fmt.Sprintf("Chart prepare's result not found: %v, %v", repo, target),
-				}
-			}
+		ma, err := m.getOrPrepareManifest(req.Context(), repo, target, rewriteOpts)
+		if err != nil {
+			return err
 		}
 		rd := sha256.Sum256(ma.Blob)
 		d := "sha256:" + hex.EncodeToString(rd[:])
@@ -178,42 +140,16 @@ func (m *Manifests) Handle(resp http.ResponseWriter, req *http.Request) error {
 		resp.Header().Set("Content-Type", ma.ContentType)
 		resp.Header().Set("Content-Length", fmt.Sprint(len(ma.Blob)))
 		resp.WriteHeader(http.StatusOK)
-		_, err := io.Copy(resp, bytes.NewReader(ma.Blob))
+		_, err = io.Copy(resp, bytes.NewReader(ma.Blob))
 		if err != nil {
 			return errors.RegErrInternal(err)
 		}
 		return nil
 
 	case http.MethodHead:
-		m.lock.Lock()
-		defer m.lock.Unlock()
-		if _, ok := m.manifests[repo]; !ok {
-
-			err := m.prepareChart(req.Context(), repo, target, rewriteOpts)
-			if err != nil {
-				return err
-			}
-		}
-		ma, ok := m.manifests[repo][target]
-		if !ok {
-			err := m.prepareChart(req.Context(), repo, target, rewriteOpts)
-			if err != nil {
-				return err
-			}
-			ma, ok = m.manifests[repo][target]
-			if !ok {
-				// check if chart was just remapped to an _ before failing
-				target = helper.SemVerReplace(target)
-				ma, ok = m.manifests[repo][target]
-				// we failed
-				if !ok {
-					return &errors.RegError{
-						Status:  http.StatusNotFound,
-						Code:    "NOT FOUND",
-						Message: "Chart prepare error",
-					}
-				}
-			}
+		ma, err := m.getOrPrepareManifest(req.Context(), repo, target, rewriteOpts)
+		if err != nil {
+			return err
 		}
 		rd := sha256.Sum256(ma.Blob)
 		d := "sha256:" + hex.EncodeToString(rd[:])
@@ -262,25 +198,16 @@ func (m *Manifests) HandleTags(resp http.ResponseWriter, req *http.Request) erro
 			Message: "We don't understand your method + url",
 		}
 	}
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
 	// Determine rewrite options from config and query params
-	rewriteOpts := m.getRewriteOptions(req)
-
-	c, ok := m.manifests[fullRepo]
-	if !ok {
-		err := m.prepareChart(req.Context(), fullRepo, "", rewriteOpts)
-		if err != nil {
-			return err
-		}
-		c, _ = m.manifests[fullRepo]
+	rewriteOpts, regErr := m.getRewriteOptions(req)
+	if regErr != nil {
+		return regErr
 	}
 
 	repoPath := strings.Join(repoParts[:len(repoParts)-1], "/")
 	var tags []string
 
-	index, _ := m.GetIndex(repoPath)
+	index, _ := m.GetIndex(req.Context(), repoPath)
 
 	if index != nil {
 		if versions, ok := index.Entries[repoParts[len(repoParts)-1]]; ok {
@@ -289,6 +216,10 @@ func (m *Manifests) HandleTags(resp http.ResponseWriter, req *http.Request) erro
 			}
 		}
 	} else {
+		if err := m.prepareManifest(req.Context(), fullRepo, "", rewriteOpts); err != nil {
+			return err
+		}
+		c := m.getVariant(fullRepo, m.variantKey(rewriteOpts))
 		for tag := range c {
 			if !strings.Contains(tag, "sha256:") {
 				tags = append(tags, tag)
@@ -300,12 +231,11 @@ func (m *Manifests) HandleTags(resp http.ResponseWriter, req *http.Request) erro
 	// https://github.com/opencontainers/distribution-spec/blob/b505e9cc53ec499edbd9c1be32298388921bb705/detail.md#tags-paginated
 	// Offset using last query parameter.
 	if last := req.URL.Query().Get("last"); last != "" {
-		for i, t := range tags {
-			if t > last {
-				tags = tags[i:]
-				break
-			}
+		i := sort.SearchStrings(tags, last)
+		for i < len(tags) && tags[i] <= last {
+			i++
 		}
+		tags = tags[i:]
 	}
 
 	// Limit using n query parameter.
@@ -337,10 +267,20 @@ func (m *Manifests) HandleTags(resp http.ResponseWriter, req *http.Request) erro
 }
 
 func (m *Manifests) Read(repo string, name string) (Manifest, error) {
+	return m.ReadVariant(repo, defaultVariantKey, name)
+}
 
-	mRepo, ok := m.manifests[repo]
+func (m *Manifests) ReadVariant(repo string, variant string, name string) (Manifest, error) {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+
+	variants, ok := m.manifests[repo]
 	if !ok {
 		return Manifest{}, fmt.Errorf("repository not found")
+	}
+	mRepo, ok := variants[variant]
+	if !ok {
+		return Manifest{}, fmt.Errorf("manifest variant not found")
 	}
 	ma, ok := mRepo[name]
 	if !ok {
@@ -350,11 +290,22 @@ func (m *Manifests) Read(repo string, name string) (Manifest, error) {
 }
 
 func (m *Manifests) Write(repo string, name string, n Manifest) error {
+	return m.WriteVariant(repo, defaultVariantKey, name, n)
+}
 
-	mRepo, ok := m.manifests[repo]
+func (m *Manifests) WriteVariant(repo string, variant string, name string, n Manifest) error {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	variants, ok := m.manifests[repo]
+	if !ok {
+		variants = map[string]map[string]Manifest{}
+		m.manifests[repo] = variants
+	}
+	mRepo, ok := variants[variant]
 	if !ok {
 		mRepo = map[string]Manifest{}
-		m.manifests[repo] = mRepo
+		variants[variant] = mRepo
 	}
 	mRepo[name] = n
 	return nil
@@ -389,7 +340,7 @@ func (m *Manifests) HandleCatalog(resp http.ResponseWriter, req *http.Request) e
 	if len(elems) > 2 {
 		// we have repo
 		repo := strings.Join(elems[0:len(elems)-2], "/")
-		index, _ := m.GetIndex(repo)
+		index, _ := m.GetIndex(req.Context(), repo)
 		if index != nil {
 			// show index's content instead of local
 			for r := range index.Entries {
@@ -402,8 +353,8 @@ func (m *Manifests) HandleCatalog(resp http.ResponseWriter, req *http.Request) e
 		}
 
 	} else {
-		m.lock.Lock()
-		defer m.lock.Unlock()
+		m.lock.RLock()
+		defer m.lock.RUnlock()
 
 		// TODO: implement pagination
 		for key := range m.manifests {
@@ -430,9 +381,11 @@ func (m *Manifests) HandleCatalog(resp http.ResponseWriter, req *http.Request) e
 	return nil
 }
 
+const defaultVariantKey = "default"
+
 // getRewriteOptions determines rewrite options from config and query parameters.
 // Query parameter "rewrite_dependencies" overrides the config setting.
-func (m *Manifests) getRewriteOptions(req *http.Request) RewriteOptions {
+func (m *Manifests) getRewriteOptions(req *http.Request) (RewriteOptions, *errors.RegError) {
 	// Start with config value
 	enabled := m.config.RewriteDependencies
 
@@ -441,14 +394,193 @@ func (m *Manifests) getRewriteOptions(req *http.Request) RewriteOptions {
 		enabled = qp == "true" || qp == "1"
 	}
 
-	// Determine proxy host: config overrides request host
-	proxyHost := m.config.ProxyHost
-	if proxyHost == "" {
-		proxyHost = req.Host
+	if !enabled {
+		return RewriteOptions{}, nil
+	}
+
+	proxyHost, err := validateProxyHost(m.config.ProxyHost)
+	if err != nil {
+		return RewriteOptions{}, errors.RegErrInternal(err)
 	}
 
 	return RewriteOptions{
 		Enabled:   enabled,
 		ProxyHost: proxyHost,
+	}, nil
+}
+
+func validateProxyHost(proxyHost string) (string, error) {
+	proxyHost = strings.TrimSpace(proxyHost)
+	if proxyHost == "" {
+		return "", fmt.Errorf("PROXY_HOST must be set when dependency rewriting is enabled")
+	}
+	parsed, err := url.Parse("//" + proxyHost)
+	if err != nil {
+		return "", fmt.Errorf("invalid PROXY_HOST: %w", err)
+	}
+	if parsed.Host == "" || parsed.Path != "" || strings.ContainsAny(proxyHost, "/?#") {
+		return "", fmt.Errorf("invalid PROXY_HOST %q", proxyHost)
+	}
+	return parsed.Host, nil
+}
+
+func (m *Manifests) variantKey(opts RewriteOptions) string {
+	if !opts.Enabled {
+		return defaultVariantKey
+	}
+	return "rewrite:" + opts.ProxyHost
+}
+
+func (m *Manifests) getVariant(repo string, variant string) map[string]Manifest {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+
+	variants, ok := m.manifests[repo]
+	if !ok {
+		return nil
+	}
+	repoManifests := variants[variant]
+	if repoManifests == nil {
+		return nil
+	}
+	copyOfRepo := make(map[string]Manifest, len(repoManifests))
+	for k, v := range repoManifests {
+		copyOfRepo[k] = v
+	}
+	return copyOfRepo
+}
+
+func (m *Manifests) getOrPrepareManifest(ctx context.Context, repo string, target string, opts RewriteOptions) (Manifest, error) {
+	variant := m.variantKey(opts)
+	if ma, err := m.ReadVariant(repo, variant, target); err == nil {
+		return ma, nil
+	}
+
+	if err := m.prepareManifest(ctx, repo, target, opts); err != nil {
+		return Manifest{}, err
+	}
+
+	if ma, err := m.ReadVariant(repo, variant, target); err == nil {
+		return ma, nil
+	}
+
+	normalized := helper.SemVerReplace(target)
+	if normalized != target {
+		if ma, err := m.ReadVariant(repo, variant, normalized); err == nil {
+			return ma, nil
+		}
+	}
+
+	return Manifest{}, &errors.RegError{
+		Status:  http.StatusNotFound,
+		Code:    "NOT FOUND",
+		Message: fmt.Sprintf("Chart prepare's result not found: %v, %v", repo, target),
+	}
+}
+
+func (m *Manifests) prepareManifest(ctx context.Context, repo string, target string, opts RewriteOptions) error {
+	variant := m.variantKey(opts)
+	prepareTarget := target
+	if prepareTarget == "" {
+		prepareTarget = "latest"
+	}
+	key := repo + "|" + variant + "|" + prepareTarget
+	_, err, _ := m.prepare.Do(key, func() (interface{}, error) {
+		if target == "" {
+			if m.hasVariant(repo, variant) {
+				return nil, nil
+			}
+		} else if _, readErr := m.ReadVariant(repo, variant, target); readErr == nil {
+			return nil, nil
+		}
+
+		prepareCtx := ctx
+		if prepareCtx == nil {
+			prepareCtx = m.baseContext
+		}
+		if prepareCtx == nil {
+			prepareCtx = context.Background()
+		}
+		if m.config.DownloadTimeout > 0 {
+			var cancel context.CancelFunc
+			prepareCtx, cancel = context.WithTimeout(prepareCtx, m.config.DownloadTimeout)
+			defer cancel()
+		}
+		if target == "" {
+			return nil, m.prepareChart(prepareCtx, repo, "", opts)
+		}
+		err := m.prepareChart(prepareCtx, repo, target, opts)
+		if err == nil {
+			return nil, nil
+		}
+		normalized := helper.SemVerReplace(target)
+		if normalized != target {
+			return nil, m.prepareChart(prepareCtx, repo, normalized, opts)
+		}
+		return nil, err
+	})
+	return err
+}
+
+func (m *Manifests) hasVariant(repo string, variant string) bool {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+
+	variants, ok := m.manifests[repo]
+	if !ok {
+		return false
+	}
+	repoManifests, ok := variants[variant]
+	return ok && len(repoManifests) > 0
+}
+
+func (m *Manifests) cleanupExpired(ctx context.Context) {
+	cutoff := time.Now().Add(-m.config.CacheTTL)
+	refsInUse := map[string]int{}
+	refsToDelete := map[string]struct{}{}
+
+	m.lock.Lock()
+	for repo, variants := range m.manifests {
+		for variant, manifests := range variants {
+			for name, ma := range manifests {
+				if ma.CreatedAt.Before(cutoff) {
+					delete(manifests, name)
+					for _, ref := range ma.Refs {
+						refsToDelete[ref] = struct{}{}
+					}
+					continue
+				}
+				for _, ref := range ma.Refs {
+					refsInUse[ref]++
+				}
+			}
+			if len(manifests) == 0 {
+				delete(variants, variant)
+			}
+		}
+		if len(variants) == 0 {
+			delete(m.manifests, repo)
+		}
+	}
+	m.lock.Unlock()
+
+	delHandler, ok := m.blobHandler.(handler.BlobDeleteHandler)
+	if !ok {
+		return
+	}
+	for ref := range refsToDelete {
+		if refsInUse[ref] > 0 {
+			continue
+		}
+		h, err := v1.NewHash(ref)
+		if err != nil {
+			continue
+		}
+		if m.config.Debug {
+			m.log.Printf("deleting blob %s", h.String())
+		}
+		if err = delHandler.Delete(ctx, "", h); err != nil {
+			m.log.Println(err)
+		}
 	}
 }

@@ -121,9 +121,12 @@ There are not many options in configure the application except the following.
 * `MANIFEST_CACHE_TTL` - for how long we have stores manifest and its related blobs, the default value is `60` seconds.
 * `INDEX_CACHE_TTL` - for how long we store chart index file content, the default value is `14400` seconds (4h)
 * `INDEX_ERROR_CACHE_TTL` - for how long we do not try to obtain index files again if it's failed for some reason. The default value is `30` seconds.
+* `DOWNLOAD_TIMEOUT` - timeout in seconds for upstream index and chart downloads. Default is `30` seconds.
+* `MAX_INDEX_BYTES` - maximum accepted size for an upstream `index.yaml` response. Default is `33554432` bytes (32 MiB).
+* `MAX_CHART_BYTES` - maximum accepted size for an upstream chart archive download. Default is `268435456` bytes (256 MiB).
 * `USE_TLS` - enabled HTTP over TLS
 * `REWRITE_DEPENDENCIES` - rewrites chart dependency repository URLs to point through the proxy. When enabled, dependencies like `https://charts.bitnami.com/bitnami` become `oci://<proxy-host>/charts.bitnami.com/bitnami`. Default is `false`.
-* `PROXY_HOST` - override the proxy host used in rewritten dependency URLs. If not set, uses the Host header from incoming requests.
+* `PROXY_HOST` - required when `REWRITE_DEPENDENCIES=true`. This must be the trusted host name clients use for the proxy.
 
 ### Dependency URL Rewriting
 

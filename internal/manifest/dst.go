@@ -29,12 +29,13 @@ var defaultManifestMediaTypes = []string{
 
 type InternalDst struct {
 	repo           string
+	variant        string
 	blobPutHandler handler.BlobPutHandler
 	manifests      *Manifests
 }
 
-func NewInternalDst(repo string, blobPutHandler handler.BlobPutHandler, manifests *Manifests) *InternalDst {
-	return &InternalDst{repo: repo, blobPutHandler: blobPutHandler, manifests: manifests}
+func NewInternalDst(repo string, variant string, blobPutHandler handler.BlobPutHandler, manifests *Manifests) *InternalDst {
+	return &InternalDst{repo: repo, variant: variant, blobPutHandler: blobPutHandler, manifests: manifests}
 }
 
 func (f *InternalDst) Tag(ctx context.Context, desc ocispec.Descriptor, reference string) error {
@@ -44,11 +45,11 @@ func (f *InternalDst) Tag(ctx context.Context, desc ocispec.Descriptor, referenc
 		return err
 	}
 
-	hm, err := f.manifests.Read(f.repo, h.String())
+	hm, err := f.manifests.ReadVariant(f.repo, f.variant, h.String())
 	if err != nil {
 		return err
 	}
-	return f.manifests.Write(f.repo, reference, hm)
+	return f.manifests.WriteVariant(f.repo, f.variant, reference, hm)
 }
 
 func (f *InternalDst) Resolve(ctx context.Context, reference string) (ocispec.Descriptor, error) {
@@ -94,7 +95,7 @@ func (f *InternalDst) Push(ctx context.Context, expected ocispec.Descriptor, con
 			}
 		}
 
-		return f.manifests.Write(f.repo, h.String(), Manifest{
+		return f.manifests.WriteVariant(f.repo, f.variant, h.String(), Manifest{
 			ContentType: expected.MediaType,
 			Blob:        binary,
 			Refs:        refs,

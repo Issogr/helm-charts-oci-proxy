@@ -52,7 +52,7 @@ func (h2 Handler) Get(ctx context.Context, repo string, h v1.Hash) (io.ReadClose
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			data = val
+			data = append([]byte(nil), val...)
 			return nil
 		})
 	})

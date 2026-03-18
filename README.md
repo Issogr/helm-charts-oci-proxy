@@ -1,172 +1,117 @@
-[![Artifact HUB](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/helm-charts-oci-proxy)](https://artifacthub.io/packages/helm/helm-charts-oci-proxy/helm-charts-oci-proxy)
-
 # Helm Chart OCI Proxy
 
-Transparently proxy and transform [Chart Repository styled](https://helm.sh/docs/topics/chart_repository/) Helm Charts as OCI artifacts. Now you can address any public Chart Repository styled Helm Chart as an OCI styled artifact.
+`helm-charts-oci-proxy` exposes classic Helm chart repositories through an OCI registry interface.
 
-> [!NOTE]
-> Helm Chart OCI Proxy is now build into [8gears Container Registry (8gcr)](https://github.com/container-registry/harbor-next). Give it a try
-
-
-<p align="center"><img src="docs/diagram.png" alt="Diagram showing the workflow of the Helm Chart OCI Proxy" width=66%></p>
-
-## What is it good for?
-
-This proxy was primary designed after Harbor 2.8 removed support for [Chart Repository](https://helm.sh/docs/topics/chart_repository/) in favor of OCI. The proxy can be used without Harbor implementing other use cases.
-
-* Store all 3rd party public Helm Charts in your OCI compliant registry. While you can switch the storage and distribution of your Helm Charts easily, it is close to impossible to do so for all sorts of 3rd party Helm Charts.
-* Simplify your workflow and tooling by only using the OCI Helm Chart and not a mix of both
-* Use it in combination with [Skopeo](https://github.com/containers/skopeo) to copy Helm Charts into your OCI registry of choice.
-
-## Usage
-
-Use our free hosted version via [chartproxy.container-registry.com](https://chartproxy.container-registry.com) or [host it yourself](#user-content-installation).
-
-### Example
-
-Here is an example of how you can use the service.
-The following helm command will fetch `cert-manager` as an OCI Helm Chart, located on charts.jetstack.io.
-
-```bash  
-helm pull oci://chartproxy.container-registry.com/charts.jetstack.io/cert-manager --version 1.11.2
-```  
-
-If you do not specify a version, the system will retrieve the latest version.
-
-```bash  
-helm pull oci://stage-proxy.container-registry.com/charts.bitnami.com/bitnami/airflow #will use latest
-```  
-
-
-#### Use with Harbor
-
-You can use the Helm Chart OCI Proxy with the Harbor Container Registry.
-Each source needs to be added as an own endpoint.
-
-To proxy, for example `charts.jetstack.io` you would set the Endpoint URL to `https://chartproxy.container-registry.com/charts.jetstack.io`.
-
-You also would set the provider to _Docker Registry_.
-
-<p align="center"><img src="docs/harbor_registry_endpoint.png" alt="Screenshot of adding Helm Chart OCI Proxy to Harbor" width=36%></p>
-
-After adding the Endpoint, you can proceed with creating the replication rule.
-
-<p align="center"><img src="docs/harbor_replication_rule.png" alt="Screenshot on how to create a replication rule for Helm Chart OCI Proxy to Harbor" width=36%></p>
-
-
-## Installation
-
-[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/helm-charts-oci-proxy)](https://artifacthub.io/packages/search?repo=helm-charts-oci-proxy)
-
-Install and operate the service yourself, we currently provide a handy Helm Chart, so you can get started quickly.
-
-Our Helm Charts are only available as OCI artifacts. Unlike with traditional Charts where you
-need to add a Repo first. With OCI, you can install the Chart with one command.
+It lets you pull charts like this:
 
 ```bash
-helm install chartproxy --version 1.0.0 --create-namespace --namespace chartproxy oci://8gears.container-registry.com/library/helm-charts-oci-proxy 
+helm pull oci://your-proxy.example.com/charts.jetstack.io/cert-manager --version 1.11.2
 ```
 
-Use `helm pull` to only pull the chart to your local disc, without installing.
+instead of consuming the upstream chart repository directly.
+
+## Project Goal
+
+This repository is intentionally focused on three things:
+
+- building the application as a container image
+- running it as a Dockerized service
+- deploying it to Kubernetes with the included Helm chart
+
+The proxy fetches `index.yaml` and chart archives from upstream Helm repositories, converts them into OCI artifacts on demand, and serves them through registry-style endpoints.
+
+## How It Works
+
+When a client requests a chart such as:
 
 ```bash
-helm pull oci://8gears.container-registry.com/library/helm-charts-oci-proxy --version 1.0.0
+helm pull oci://your-proxy.example.com/charts.bitnami.com/bitnami/redis --version 20.6.0
 ```
 
-### Installation outside Kubernetes
+the proxy will:
 
-We also provide the container image that you use with your container runtime of choice.
+1. download the upstream Helm repository index
+2. resolve the requested chart version
+3. fetch the chart archive
+4. convert it into OCI manifest + blobs
+5. return it through the OCI registry API
+
+## Run With Docker
+
+Build the image:
 
 ```bash
-docker pull 8gears.container-registry.com/library/helm-charts-oci-proxy
+docker build -t helm-charts-oci-proxy .
 ```
 
+Run the proxy:
 
-## Development
+```bash
+docker run --rm -p 9000:9000 helm-charts-oci-proxy
+```
 
-Build the binary
+Then pull through it:
 
-```shell  
-./do.sh build
-```  
+```bash
+helm pull oci://localhost:9000/charts.jetstack.io/cert-manager --version 1.11.2
+```
 
-### Run Locally
-```shell  
-./do.sh run
-```  
+## Deploy With Helm
 
-### Run Tests
+Install the included chart from this repository:
 
-Tests without specifying a version will pull the latest version.
+```bash
+helm install chartproxy ./chart --create-namespace --namespace chartproxy
+```
 
-```shell  
-helm pull --repository-cache=/tmp2 oci://registry:9000/charts.jetstack.io/cert-manager-istio-csr  
-helm pull oci://registry:9000/charts.jetstack.io/cert-manager-istio-csr  
-helm pull oci://registry:9000/charts.bitnami.com/bitnami/airflow  
-helm pull oci://registry:9000/charts.bitnami.com/bitnami/airflow --version 14.0.11  
-```  
+Or render it first:
 
-With specific version
+```bash
+helm template chartproxy ./chart
+```
 
-```shell  
-helm pull --repository-cache=/tmp2 oci://registry:9000/charts.jetstack.io/cert-manager-istio-csr --version 0.2.1
-```  
+By default the chart deploys the proxy as a single pod with in-memory storage.
 
-### Environment Variables
+## Configuration
 
-There are not many options in configure the application except the following.
+Main environment variables:
 
-* `PORT` - specifies port, default `9000`
-* `DEBUG` - enabled debug if it's `TRUE`
-* `MANIFEST_CACHE_TTL` - for how long we have stores manifest and its related blobs, the default value is `60` seconds.
-* `INDEX_CACHE_TTL` - for how long we store chart index file content, the default value is `14400` seconds (4h)
-* `INDEX_ERROR_CACHE_TTL` - for how long we do not try to obtain index files again if it's failed for some reason. The default value is `30` seconds.
-* `DOWNLOAD_TIMEOUT` - timeout in seconds for upstream index and chart downloads. Default is `30` seconds.
-* `MAX_INDEX_BYTES` - maximum accepted size for an upstream `index.yaml` response. Default is `33554432` bytes (32 MiB).
-* `MAX_CHART_BYTES` - maximum accepted size for an upstream chart archive download. Default is `268435456` bytes (256 MiB).
-* `USE_TLS` - enabled HTTP over TLS
-* `REWRITE_DEPENDENCIES` - rewrites chart dependency repository URLs to point through the proxy. When enabled, dependencies like `https://charts.bitnami.com/bitnami` become `oci://<proxy-host>/charts.bitnami.com/bitnami`. Default is `false`.
-* `PROXY_HOST` - required when `REWRITE_DEPENDENCIES=true`. This must be the trusted host name clients use for the proxy.
+- `PORT` - listen port, default `9000`
+- `DEBUG` - enable debug logging
+- `MANIFEST_CACHE_TTL` - manifest/blob cache TTL in seconds, default `60`
+- `INDEX_CACHE_TTL` - upstream index cache TTL in seconds, default `14400`
+- `INDEX_ERROR_CACHE_TTL` - retry delay after index fetch failure in seconds, default `30`
+- `DOWNLOAD_TIMEOUT` - upstream HTTP timeout in seconds, default `30`
+- `MAX_INDEX_BYTES` - maximum accepted upstream `index.yaml` size, default `33554432`
+- `MAX_CHART_BYTES` - maximum accepted upstream chart archive size, default `268435456`
+- `USE_TLS` - enable direct TLS serving inside the container
+- `CERT_FILE` - TLS certificate path, default `/tls/tls.crt`
+- `KEY_FILE` - TLS key path, default `/tls/tls.key`
+- `REWRITE_DEPENDENCIES` - rewrite chart dependency repositories to point back to this proxy
+- `PROXY_HOST` - required when `REWRITE_DEPENDENCIES=true`
 
-### Dependency URL Rewriting
+For Kubernetes, TLS is usually terminated by an Ingress or reverse proxy. If you want the application itself to serve TLS, mount a secret at `/tls` or override `CERT_FILE` and `KEY_FILE`.
 
-When a Helm chart has dependencies, those repository URLs are hardcoded in `Chart.yaml`. By default, even if you pull the parent chart through this proxy, Helm will fetch dependencies from their original public URLs.
+## Dependency Rewriting
 
-With `REWRITE_DEPENDENCIES=true`, the proxy rewrites dependency URLs so all charts are also fetched through the proxy:
+If `REWRITE_DEPENDENCIES=true`, dependency repositories inside `Chart.yaml` are rewritten from URLs like:
 
 ```yaml
-# Original Chart.yaml dependency
-dependencies:
-  - name: redis
-    repository: https://charts.bitnami.com/bitnami
-
-# After rewriting (when PROXY_HOST=chartproxy.container-registry.com)
-dependencies:
-  - name: redis
-    repository: oci://chartproxy.container-registry.com/charts.bitnami.com/bitnami
+repository: https://charts.bitnami.com/bitnami
 ```
 
-You can also enable/disable rewriting per-request using the `rewrite_dependencies` query parameter:
+to:
 
-```bash
-# Enable rewriting for this request
-helm pull "oci://chartproxy.example.com/charts.bitnami.com/bitnami/redis?rewrite_dependencies=true"
-
-# Disable rewriting for this request
-helm pull "oci://chartproxy.example.com/charts.jetstack.io/cert-manager?rewrite_dependencies=false"
+```yaml
+repository: oci://your-proxy.example.com/charts.bitnami.com/bitnami
 ```
 
-The following URL types are NOT rewritten:
-- `file://` - local file dependencies
-- `@alias` or `alias:` - Helm repository aliases
-- Empty URLs
+This is useful when you want dependency resolution to stay inside your proxy path as well.
 
-> [!WARNING]
-> Enabling `REWRITE_DEPENDENCIES` modifies the `Chart.yaml` inside the chart tarball, which will break Helm chart signature verification. If you rely on provenance files (`.prov`) or `helm verify`, do not use this feature.
+Note that rewriting changes the chart archive contents, so Helm provenance/signature verification will no longer match the original upstream package.
 
+## License and Origin
 
-### TODO
+This project is licensed under the GNU Affero General Public License v3.0. See `LICENSE`.
 
-* CI/CD Pipeline with GitHub Action
-* Add tests
-* Add helm index cache layer
+It was originally developed by 8gears / Container Registry, and that origin should remain credited in derivative and redistributed versions of the project.

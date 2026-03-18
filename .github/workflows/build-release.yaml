@@ -5,8 +5,6 @@ on:
       - 'v*.*.*'
     branches:
       - main
-    paths-ignore:
-      - 'docs/**'
 jobs:
   tests:
     name: Unit Tests
@@ -35,7 +33,7 @@ jobs:
       - name: Run Unit Tests
         id: run-tests
         run: |
-          ./do.sh tests
+          go test ./...
 
   prepare:
     name: Prepare
@@ -92,5 +90,5 @@ jobs:
           REPOSITORY: ${{ vars.REGISTRY_ADDR }}/library/helm-charts-oci-proxy
           IMAGE_TAG: ${{ needs.prepare.outputs.tag_name }}
         run: |
-          docker build --build-arg="VERSION=$IMAGE_TAG" -t $REPOSITORY:$IMAGE_TAG .
+          docker build -t $REPOSITORY:$IMAGE_TAG .
           docker push $REPOSITORY:$IMAGE_TAG

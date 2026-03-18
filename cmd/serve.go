@@ -76,8 +76,8 @@ Contents are only stored in memory, and when the process exits, pushed data is l
 			}
 
 			useTLS, _ := env.GetBool("USE_TLS", false)
-			certFile := env.GetString("CERT_FILE", "certs/registry.pem")
-			keyfileFile := env.GetString("KEY_FILE", "certs/registry-key.pem")
+			certFile := env.GetString("CERT_FILE", "/tls/tls.crt")
+			keyfileFile := env.GetString("KEY_FILE", "/tls/tls.key")
 
 			listener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
 			if err != nil {

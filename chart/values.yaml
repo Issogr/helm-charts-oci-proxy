@@ -69,16 +69,6 @@ resources:
     cpu: 100m
     memory: 128Mi
 
-# persistence
-persistence:
-  enabled: false
-  existingClaim: ""
-  size: 5Gi
-  # storageClass: "-"
-  accessMode: ReadWriteOnce
-  annotations: {}
-# custom app values
-
 autoscaling:
   enabled: false
   minReplicas: 1

@@ -6,13 +6,12 @@ COPY go.sum .
 RUN go mod download
 COPY . .
 
-#RUN ./do.sh tests
-RUN ./do.sh build
+RUN go build -o /out/proxy .
 
 FROM cgr.dev/chainguard/wolfi-base
 ENV PORT=9000
 ENV USE_TLS=false
-COPY --from=build-env /app/.bin/proxy /proxy
+COPY --from=build-env /out/proxy /proxy
 USER 65534
 EXPOSE 9000
-CMD ["/bin/sh", "-c", "./proxy registry serve"]
+CMD ["/proxy", "registry", "serve"]

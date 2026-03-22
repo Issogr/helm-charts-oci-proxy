@@ -203,14 +203,34 @@ func (m *Manifests) HandleTags(resp http.ResponseWriter, req *http.Request) erro
 	if regErr != nil {
 		return regErr
 	}
+	if len(repoParts) == 0 {
+		return &errors.RegError{
+			Status:  http.StatusBadRequest,
+			Code:    "BAD_REQUEST",
+			Message: "missing repository in tags request",
+		}
+	}
+	limit := -1
+	if ns := req.URL.Query().Get("n"); ns != "" {
+		n, err := strconv.Atoi(ns)
+		if err != nil || n < 0 {
+			return &errors.RegError{
+				Status:  http.StatusBadRequest,
+				Code:    "BAD_REQUEST",
+				Message: "n must be a non-negative integer",
+			}
+		}
+		limit = n
+	}
 
 	repoPath := strings.Join(repoParts[:len(repoParts)-1], "/")
+	chartName := repoParts[len(repoParts)-1]
 	var tags []string
 
 	index, _ := m.GetIndex(req.Context(), repoPath)
 
 	if index != nil {
-		if versions, ok := index.Entries[repoParts[len(repoParts)-1]]; ok {
+		if versions, ok := index.Entries[chartName]; ok {
 			for _, v := range versions {
 				tags = append(tags, strings.TrimLeft(v.Version, "v"))
 			}
@@ -239,16 +259,8 @@ func (m *Manifests) HandleTags(resp http.ResponseWriter, req *http.Request) erro
 	}
 
 	// Limit using n query parameter.
-	if ns := req.URL.Query().Get("n"); ns != "" {
-		if n, err := strconv.Atoi(ns); err != nil {
-			return &errors.RegError{
-				Status:  http.StatusBadRequest,
-				Code:    "BAD_REQUEST",
-				Message: fmt.Sprintf("parsing n: %v", err),
-			}
-		} else if n < len(tags) {
-			tags = tags[:n]
-		}
+	if limit >= 0 && limit < len(tags) {
+		tags = tags[:limit]
 	}
 
 	tagsToList := listTags{
@@ -310,8 +322,12 @@ func (m *Manifests) HandleCatalog(resp http.ResponseWriter, req *http.Request) e
 	if nStr != "" {
 		var err error
 		n, err = strconv.Atoi(nStr)
-		if err != nil {
-			return errors.RegErrInternal(err)
+		if err != nil || n < 0 {
+			return &errors.RegError{
+				Status:  http.StatusBadRequest,
+				Code:    "BAD_REQUEST",
+				Message: "n must be a non-negative integer",
+			}
 		}
 	}
 

@@ -279,6 +279,49 @@ entries:
 	}
 }
 
+func TestRegistryE2E_InvalidTagAndCatalogQueriesReturnBadRequest(t *testing.T) {
+	proxy, _ := newProxyServer(t, &http.Client{Timeout: 5 * time.Second}, Config{
+		CacheTTL:        time.Minute,
+		DownloadTimeout: 5 * time.Second,
+		MaxIndexBytes:   1 << 20,
+		MaxChartBytes:   1 << 20,
+	})
+	defer proxy.Close()
+
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{
+			name: "negative tags n",
+			url:  proxy.URL + "/v2/example.com/demo/tags/list?n=-1",
+		},
+		{
+			name: "missing tags repository",
+			url:  proxy.URL + "/x/v2/tags/list",
+		},
+		{
+			name: "negative catalog n",
+			url:  proxy.URL + "/v2/_catalog?n=-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := proxy.Client().Get(tt.url)
+			if err != nil {
+				t.Fatalf("GET %s: %v", tt.url, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusBadRequest {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("expected 400, got %d: %s", resp.StatusCode, string(body))
+			}
+		})
+	}
+}
+
 func newProxyServer(t *testing.T, upstreamClient *http.Client, cfg Config) (*httptest.Server, *Manifests) {
 	t.Helper()
 	ctx := context.Background()

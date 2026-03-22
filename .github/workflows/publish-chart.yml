@@ -13,6 +13,10 @@ on:
         description: App version to embed in the chart (defaults to version)
         required: false
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   publish-chart:
     runs-on: ubuntu-latest
@@ -67,7 +71,7 @@ jobs:
         run: helm package chart -d ./tmp
 
       - name: Login to registry
-        run: echo "${{ secrets.REGISTRY_PASSWORD }}" | helm registry login ${{ vars.REGISTRY_ADDR }} --username ${{ vars.REGISTRY_USERNAME }} --password-stdin
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
 
       - name: Push packaged chart to registry
-        run: helm push ./tmp/* oci://${{ vars.REGISTRY_ADDR }}/library
+        run: helm push ./tmp/* oci://ghcr.io/${{ github.repository_owner }}/helm-charts

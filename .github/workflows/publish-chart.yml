@@ -24,6 +24,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Compute lowercase owner
+        id: owner
+        run: echo "value=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
       - name: Determine release versions
         id: versions
         run: |
@@ -74,4 +78,4 @@ jobs:
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
 
       - name: Push packaged chart to registry
-        run: helm push ./tmp/* oci://ghcr.io/${{ github.repository_owner }}/helm-charts
+        run: helm push ./tmp/* oci://ghcr.io/${{ steps.owner.outputs.value }}/helm-charts

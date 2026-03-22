@@ -50,13 +50,16 @@ jobs:
     outputs:
       environment: ${{ steps.vars.outputs.environment }}
       image_tag: ${{ steps.vars.outputs.image_tag }}
+      owner_lc: ${{ steps.vars.outputs.owner_lc }}
     steps:
       - name: Compute build metadata
         id: vars
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
+          OWNER_LC="${GITHUB_REPOSITORY_OWNER,,}"
           echo "environment=production" >> "$GITHUB_OUTPUT"
           echo "image_tag=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "owner_lc=${OWNER_LC}" >> "$GITHUB_OUTPUT"
 
   build-container:
     name: Build And Push Container
@@ -79,7 +82,7 @@ jobs:
 
       - name: Build and push container image
         env:
-          REPOSITORY: ghcr.io/${{ github.repository_owner }}/helm-charts-oci-proxy
+          REPOSITORY: ghcr.io/${{ needs.prepare.outputs.owner_lc }}/helm-charts-oci-proxy
           IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
         run: |
           docker build -t "$REPOSITORY:$IMAGE_TAG" .
